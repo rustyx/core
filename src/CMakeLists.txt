@@ -105,6 +105,7 @@ set(libinputactions_SRCS
     libinputactions/scripting/signals/EmittableJSSignal.cpp
     libinputactions/scripting/signals/JSSignal.cpp
     libinputactions/scripting/signals/Signal.h
+    libinputactions/scripting/BusyThreadWatchdog.cpp
     libinputactions/scripting/JSFunctionAction.cpp
     libinputactions/scripting/JSFunctionCondition.cpp
     libinputactions/scripting/ModuleScriptMetadata.cpp

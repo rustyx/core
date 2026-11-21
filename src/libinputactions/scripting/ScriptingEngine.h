@@ -22,6 +22,7 @@
 #include <QMetaEnum>
 #include <QObject>
 #include <memory>
+#include <mutex>
 
 Q_DECLARE_LOGGING_CATEGORY(INPUTACTIONS_SCRIPTING)
 
@@ -142,12 +143,16 @@ public:
     static QString errorToString(const QJSValue &error);
     static void logError(const QJSValue &error);
 
-private slots:
-    void onWatchdogRestartTimerTick();
-
 private:
     void initialize();
-    void initializeWatchdog();
+    /**
+     * Creates the watchdog if it doesn't exist yet. There is only one, as all engines run on the main thread.
+     */
+    static void initializeWatchdog();
+    /**
+     * Runs on the watchdog thread.
+     */
+    static void onMainThreadStuck();
 
     void registerBuiltinModule(const QString &name, Module *module);
 
@@ -159,11 +164,11 @@ private:
     std::map<QString, QJSValue> m_builtinModules;
     std::map<QString, QJSValue> m_cachedScripts;
 
-    QThread *m_watchdogTimerThread{};
-    QTimer *m_watchdogTimer{};
-    QTimer m_watchdogRestartTimer;
-
+    /**
+     * Modified only on the main thread, guarded by s_enginesMutex because the watchdog thread reads it.
+     */
     inline static std::set<ScriptingEngine *> s_engines;
+    inline static std::mutex s_enginesMutex;
 };
 
 inline std::unique_ptr<ScriptingEngine> g_scriptingEngine;

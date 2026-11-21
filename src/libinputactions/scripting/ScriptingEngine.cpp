@@ -17,6 +17,7 @@
 */
 
 #include "ScriptingEngine.h"
+#include "BusyThreadWatchdog.h"
 #include "modules/Module.h"
 #include "modules/core/CoreModule.h"
 #include "modules/desktop/generic/DesktopGenericModule.h"
@@ -36,29 +37,33 @@ Q_LOGGING_CATEGORY(INPUTACTIONS_SCRIPTING, "inputactions.scripting", QtWarningMs
 namespace InputActions
 {
 
-static const std::chrono::milliseconds WATCHDOG_TIMER_TIMEOUT{2000};
-static const std::chrono::milliseconds WATCHDOG_TIMER_RESET_INTERVAL{1000};
+static const std::chrono::milliseconds WATCHDOG_TIMEOUT{2000};
+/**
+ * Exists as long as any engine does.
+ */
+static std::unique_ptr<BusyThreadWatchdog> s_watchdog;
 
 ScriptingEngine::ScriptingEngine(std::shared_ptr<InputBackend> inputBackend, std::shared_ptr<VariableRegistry> variableRegistry)
     : m_inputBackend(std::move(inputBackend))
     , m_variableRegistry(std::move(variableRegistry))
 {
     QJSEngine::setObjectOwnership(this, QJSEngine::CppOwnership);
-    s_engines.insert(this);
+    {
+        const std::lock_guard lock(s_enginesMutex);
+        s_engines.insert(this);
+    }
     initialize();
 }
 
 ScriptingEngine::~ScriptingEngine()
 {
-    s_engines.erase(this);
-
-    if (m_watchdogTimer) {
-        QMetaObject::invokeMethod(m_watchdogTimer, "stop", Qt::BlockingQueuedConnection);
-        m_watchdogTimerThread->quit();
-        m_watchdogTimerThread->wait();
-
-        m_watchdogTimer->deleteLater();
-        m_watchdogTimerThread->deleteLater();
+    {
+        const std::lock_guard lock(s_enginesMutex);
+        s_engines.erase(this);
+    }
+    if (s_engines.empty()) {
+        // Not while holding the lock, the destructor waits for the watchdog thread, which may be waiting for the lock
+        s_watchdog.reset();
     }
 }
 
@@ -136,28 +141,32 @@ void ScriptingEngine::initialize()
 
 void ScriptingEngine::initializeWatchdog()
 {
-    m_watchdogTimerThread = new QThread;
-    m_watchdogTimer = new QTimer;
+    if (!s_watchdog) {
+        s_watchdog = std::make_unique<BusyThreadWatchdog>(WATCHDOG_TIMEOUT, &ScriptingEngine::onMainThreadStuck);
+    }
+}
 
-    m_watchdogTimer->setInterval(WATCHDOG_TIMER_TIMEOUT);
-    m_watchdogTimer->moveToThread(m_watchdogTimerThread);
-    connect(m_watchdogTimer, &QTimer::timeout, [this]() {
-        m_engine.setInterrupted(true);
-        QThreadHelpers::runOnThread(QThreadHelpers::mainThread(), []() {
-            g_notificationManager
-                ->sendNotification("Infinite loop detected",
-                                   "A script has likely entered an infinite loop and frozen the main thread. InputActions has been suspended.");
-            g_configLoader->load({
-                .empty = true,
-            });
+void ScriptingEngine::onMainThreadStuck()
+{
+    qCWarning(INPUTACTIONS_SCRIPTING,
+              "The main thread has been busy for over %lld ms, a script has likely entered an infinite loop. Suspending.",
+              static_cast<long long>(WATCHDOG_TIMEOUT.count()));
+
+    {
+        // It's unknown which engine is running the script
+        const std::lock_guard lock(s_enginesMutex);
+        for (auto *engine : s_engines) {
+            engine->m_engine.setInterrupted(true);
+        }
+    }
+
+    QThreadHelpers::runOnThread(QThreadHelpers::mainThread(), []() {
+        g_notificationManager->sendNotification("Infinite loop detected",
+                                                "A script has likely entered an infinite loop and frozen the main thread. InputActions has been suspended.");
+        g_configLoader->load({
+            .empty = true,
         });
     });
-    m_watchdogTimerThread->start();
-
-    connect(&m_watchdogRestartTimer, &QTimer::timeout, this, &ScriptingEngine::onWatchdogRestartTimerTick);
-    m_watchdogRestartTimer.setInterval(WATCHDOG_TIMER_RESET_INTERVAL);
-    m_watchdogRestartTimer.start();
-    onWatchdogRestartTimerTick();
 }
 
 QJSValue ScriptingEngine::require(const QString &module)
@@ -296,11 +305,6 @@ ScriptingEngine *ScriptingEngine::engineForObject(const QObject *object)
 
     qCCritical(INPUTACTIONS_SCRIPTING).noquote().nospace() << "Failed to get engine for object " << object;
     return {};
-}
-
-void ScriptingEngine::onWatchdogRestartTimerTick()
-{
-    QMetaObject::invokeMethod(m_watchdogTimer, "start", Qt::QueuedConnection);
 }
 
 }
