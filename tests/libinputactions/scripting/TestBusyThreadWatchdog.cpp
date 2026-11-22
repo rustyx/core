@@ -1,5 +1,7 @@
 #include "Test.h"
 #include <libinputactions/scripting/BusyThreadWatchdog.h>
+#include <thread>
+#include <unistd.h>
 
 namespace InputActions
 {
@@ -90,6 +92,29 @@ private slots:
         }
         QCOMPARE(reports.load(), 1);
     }
+
+    void threadWaitState_blockedThread()
+    {
+        int pipeFds[2];
+        QCOMPARE(pipe(pipeFds), 0);
+        std::atomic<pid_t> threadId{};
+        std::thread thread([&threadId, &pipeFds]() {
+            threadId = gettid();
+            char c;
+            (void)!read(pipeFds[0], &c, 1);
+        });
+
+        QTRY_VERIFY(threadId && BusyThreadWatchdog::threadWaitState(threadId).startsWith("state S, wchan "));
+        const auto state = BusyThreadWatchdog::threadWaitState(threadId);
+        QVERIFY2(!state.endsWith("wchan unknown") && !state.endsWith("wchan "), qPrintable(state));
+
+        (void)!write(pipeFds[1], "x", 1);
+        thread.join();
+        close(pipeFds[0]);
+        close(pipeFds[1]);
+    }
+
+    void threadWaitState_nonexistentThread() { QCOMPARE(BusyThreadWatchdog::threadWaitState(-1), "state unknown, wchan unknown"); }
 };
 
 }

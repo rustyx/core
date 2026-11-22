@@ -19,6 +19,7 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
 #include <QTimer>
 #include <atomic>
 #include <chrono>
@@ -26,6 +27,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <sys/types.h>
 
 class QThread;
 
@@ -37,6 +39,7 @@ namespace InputActions
  *
  * The thread is considered stuck when it has not returned to its event loop for longer than the timeout and has spent at least half of the timeout on a CPU
  * since then. A thread that is blocked waiting (e.g. for a D-Bus reply or an unresponsive compositor) is not considered stuck, as it will recover on its own.
+ * Such stalls are logged instead, along with what the thread is waiting for.
  */
 class BusyThreadWatchdog : public QObject
 {
@@ -48,6 +51,11 @@ public:
      */
     BusyThreadWatchdog(std::chrono::milliseconds timeout, std::function<void()> onStuck);
     ~BusyThreadWatchdog() override;
+
+    /**
+     * @return The scheduler state of a thread of this process and the kernel function it's waiting in, for diagnostics.
+     */
+    static QString threadWaitState(pid_t threadId);
 
 private:
     /**
@@ -63,6 +71,7 @@ private:
     std::chrono::milliseconds m_timeout;
     std::function<void()> m_onStuck;
     std::optional<clockid_t> m_monitoredThreadCpuClock;
+    pid_t m_monitoredThreadId;
 
     /**
      * Lives on the monitored thread, increments m_heartbeats whenever the thread processes events.
@@ -81,6 +90,12 @@ private:
     std::chrono::steady_clock::time_point m_baselineTime;
     std::optional<std::chrono::nanoseconds> m_baselineCpuTime;
     bool m_stuckReported{};
+    std::chrono::steady_clock::time_point m_lastCheckTime;
+    /**
+     * Like m_baselineTime, but excludes periods during which the watchdog thread was not running either.
+     */
+    std::chrono::steady_clock::time_point m_blockedSince;
+    bool m_blockedReported{};
 };
 
 }
